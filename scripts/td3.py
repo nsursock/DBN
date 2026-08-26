@@ -395,8 +395,6 @@ class TD3(MLXAgent):
             pbar.update(self.n_envs)
 
         pbar.close()
-        if self._csv_file:
-            self._csv_file.close()
         return self
 
     def save(self, path: str):

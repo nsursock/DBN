@@ -379,8 +379,6 @@ class PPO(MLXAgent):
             row = self._log(self.total_timesteps, time.perf_counter() - start_time, rew_b[-1], mx.ones((self.n_envs,)) * T, train)
             pbar.set_postfix(fps=row["time/fps"], reward=f"{row['rollout/ep_rew_mean']:.1f}", slope=f"{row['rollout/reward_slope']:.3f}", noise=f"{row['rollout/reward_noise']:.2f}")
         pbar.close()
-        if self._csv_file:
-            self._csv_file.close()
         self.env.state = obs
         self.env._episode_length = episode_length
         return self
