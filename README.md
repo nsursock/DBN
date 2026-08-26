@@ -1,76 +1,165 @@
 # DBN — Developing a Trading Bot using zero AI fees
 
-DBN is an experimental Python framework for training and evaluating self-hosted trading bots with reinforcement learning. The goal is to keep the workflow entirely local — no paid AI API calls, no cloud inference, no per-token fees — while still getting competitive throughput on Apple Silicon.
+DBN is an experimental, self-contained Python framework for training and evaluating reinforcement-learning agents locally on Apple Silicon. It is built on top of [MLX](https://github.com/ml-explore/mlx) and uses Stable-Baselines3-shaped APIs so existing configs, notebooks and muscle memory can be reused without any cloud inference, per-token fees or paid GPU subscriptions.
+
+The codebase is intentionally split between:
+
+- **RL agents and environments** (`scripts/`, `tests/`) for rapid prototyping on classic control tasks.
+- **Synthetic market data** (`scripts/data.py`, `scripts/viz.py`, `configs/`) for the trading-bot direction.
+- **Native benchmarking tools** (`utils/bench/`) for measuring throughput, memory and time-to-solve on MLX.
 
 ## Features
 
-- Pure, local MLX-based RL training
-- Vectorized environment rollouts
-- PPO, SAC and other baseline algorithms
-- Minimal dependency footprint
-- Built-in FPS/throughput benchmarks
+- **Native MLX training** — PPO, SAC and TD3 written in pure MLX with batched, vectorized updates.
+- **SB3-style API** — familiar constructor arguments (`learning_rate`, `gamma`, `buffer_size`, `batch_size`, `tensorboard_log`, ...).
+- **Vectorized environments** — pure-MLX `CartPoleMLX` and `PendulumMLX` that scale to tens of thousands of parallel envs.
+- **Throughput & TTS benchmarks** — `utils/bench/scale.py` and `utils/bench/solve.py` with auto-doubling and plateau detection.
+- **Live thermal telemetry** — `smctemp`, `powermetrics` and `osx-cpu-temp` support via a best-effort fallback chain.
+- **Synthetic market data** — OHLC, volume, returns, volatility, funding and alpha channels generated as MLX tensors.
+- **Minimal footprint** — see `requirements.txt`.
+
+## Requirements
+
+- Python 3.11 (see `.python-version`)
+- macOS with Apple Silicon (MLX targets Metal)
+- Optional but recommended: `smctemp` (`brew install narugit/smctemp/smctemp`) for live CPU temperature
 
 ## Installation
 
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Usage
+## Project layout
 
-Run a throughput benchmark for a given environment and algorithm:
-
-```bash
-.venv/bin/python utils/bench/scale.py normal \
-  --env cartpole --algo ppo --max-envs 16384
+```text
+.
+├── scripts/           # Agents, data generation and visualization
+│   ├── agent.py       # Common Agent / MLXAgent interface
+│   ├── ppo.py         # MLX PPO
+│   ├── sac.py         # MLX SAC
+│   ├── td3.py         # MLX TD3
+│   ├── data.py        # Synthetic market data
+│   └── viz.py         # Plotly candlestick charts
+├── tests/             # Vectorized envs and pytest suite
+│   ├── cartpole.py    # CartPoleMLX
+│   ├── pendulum.py    # PendulumMLX
+│   └── test_*.py
+├── utils/bench/       # Benchmarking harness
+│   ├── common.py      # Shared MLX / telemetry helpers
+│   ├── scale.py       # Throughput scaling sweep
+│   └── solve.py       # Time-to-solve benchmark
+├── configs/           # Market simulation config and Plotly themes
+│   ├── config.yaml
+│   └── themes/
+└── README.md
 ```
 
-Or with SAC on a continuous control task:
+## Quick start
+
+### 1. Throughput benchmark
 
 ```bash
 .venv/bin/python utils/bench/scale.py normal \
-  --env pendulum --algo sac --max-envs 100000
+  --env cartpole --algo ppo --max-envs 100_000
+```
+
+This auto-doubles `n_envs` until throughput plateaus and reports env/train FPS, RSS/peak memory and thermal state.
+
+### 2. Time-to-solve benchmark
+
+```bash
+.venv/bin/python utils/bench/solve.py \
+  --target pendulum_sac --envs 32 128 256
+```
+
+`--target` can be `cartpole_ppo`, `pendulum_ppo`, `pendulum_sac`, `pendulum_td3` or `all`.
+
+### 3. Smoke tests
+
+```bash
+.venv/bin/python -m pytest
+```
+
+Or use the built-in smoke flags:
+
+```bash
+.venv/bin/python utils/bench/scale.py normal --smoke
+.venv/bin/python utils/bench/solve.py --smoke
+```
+
+## Example: synthetic market data
+
+```bash
+.venv/bin/python - <<'PY'
+from scripts.data import generate_market_data, load_config
+from scripts.viz import plot_market_data
+
+config = load_config("configs/config.yaml")
+tensor, symbols = generate_market_data(config)
+plot_market_data(tensor, symbols, theme_name="synthwave", symbol="BTC")
+PY
+```
+
+Output is written to `outputs/market/{theme_name}.png`.
+
+## Agents
+
+All agents follow a minimal `predict / learn / save / load` interface:
+
+```python
+from tests.cartpole import CartPoleMLX
+from scripts.ppo import PPO
+
+env = CartPoleMLX(n_envs=64, seed=0)
+model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="runs/cartpole")
+model.learn(100_000)
+model.save("checkpoints/cartpole_ppo.safetensors")
+```
+
+SAC and TD3 work the same way and expect a continuous `PendulumMLX` environment:
+
+```python
+from tests.pendulum import PendulumMLX
+from scripts.sac import SAC
+
+env = PendulumMLX(n_envs=64, seed=0)
+model = SAC("MlpPolicy", env, verbose=1, tensorboard_log="runs/pendulum")
+model.learn(100_000)
 ```
 
 ## Benchmarks
 
-The tables below were produced by `utils/bench/scale.py` on Apple Silicon in `normal` mode.
+`utils/bench/common.py` provides shared helpers for:
 
-### CartPole — PPO
+- RSS and peak memory tracking
+- Best-effort thermal monitoring (`smctemp -c`, `sudo powermetrics --samplers thermal`, `osx-cpu-temp`)
+- Stable-Baselines3-shaped model and environment construction
 
-| env      | algo   |   n_envs |    env FPS |   train FPS |   RSS MB |   peak MB |   ΔRSS MB | temp °C   |   wall s |
+### Sample throughput run
+
+CartPole PPO on Apple Silicon, `n_envs` auto-doubling from 16 to 8192:
+
+| env      | algo   |   n_envs |    env FPS |   train FPS |   RSS MB |   peak MB |   ΔRSS MB |   thermal |   wall s |
 |----------|--------|----------|------------|-------------|----------|-----------|-----------|-----------|----------|
-| cartpole | PPO    |       16 |     53,322 |      72,361 |    307   |     307   |     249.2 | N/A       |     2.83 |
-| cartpole | PPO    |       32 |    175,332 |     101,863 |    321.1 |     321.1 |      14.1 | N/A       |     4.02 |
-| cartpole | PPO    |       64 |    349,578 |     198,614 |    337.9 |     337.9 |      16.8 | N/A       |     4.13 |
-| cartpole | PPO    |      128 |    704,116 |     382,621 |    346.3 |     346.3 |       8.4 | N/A       |     2.61 |
-| cartpole | PPO    |      256 |  1,415,516 |     739,469 |    352.5 |     352.5 |       6.3 | N/A       |     1.35 |
-| cartpole | PPO    |      512 |  2,779,393 |   1,091,651 |    363.4 |     363.4 |      10.8 | N/A       |     0.92 |
-| cartpole | PPO    |     1024 |  5,515,208 |   1,375,326 |    378.5 |     378.5 |      15.1 | N/A       |     0.73 |
-| cartpole | PPO    |     2048 | 11,097,747 |   1,530,263 |    394.6 |     394.6 |      16.2 | N/A       |     0.66 |
-| cartpole | PPO    |     4096 | 20,588,072 |   1,643,364 |    411.6 |     411.6 |      16.9 | N/A       |     0.61 |
-| cartpole | PPO    |     8192 | 41,555,064 |   1,564,714 |    421.9 |     421.9 |      10.3 | N/A       |     0.65 |
-| cartpole | PPO    |    16384 | 80,663,622 |   1,453,994 |    424.8 |     424.8 |       2.8 | N/A       |     0.7  |
+| cartpole | PPO    |       16 |     50,291 |      84,208 |    313.6 |     313.6 |       257 |      66.4 |     4.75 |
+| cartpole | PPO    |       32 |    173,541 |     166,474 |    331.6 |     331.6 |        18 |      69.3 |     4.81 |
+| cartpole | PPO    |       64 |    357,939 |     306,718 |    340.3 |     340.3 |       8.6 |      70.8 |     3.26 |
+| cartpole | PPO    |      128 |    716,405 |     529,114 |    349.2 |     349.2 |       8.9 |      69.9 |     1.89 |
+| cartpole | PPO    |      256 |  1,426,155 |   1,101,501 |    366.6 |     366.6 |      17.4 |      71.2 |     0.91 |
+| cartpole | PPO    |      512 |  2,888,197 |   1,750,960 |    370.2 |     370.2 |       3.6 |      69.9 |     0.57 |
+| cartpole | PPO    |     1024 |  5,671,038 |   3,115,224 |    373.3 |     373.3 |       3.1 |      69.9 |     0.32 |
+| cartpole | PPO    |     2048 | 11,231,887 |   3,610,902 |    380.6 |     380.6 |       7.3 |      70   |     0.28 |
+| cartpole | PPO    |     4096 | 22,005,588 |   3,584,210 |    385.9 |     385.9 |       5.3 |      69.9 |     0.28 |
+| cartpole | PPO    |     8192 | 41,560,339 |   3,570,957 |    385.9 |     385.9 |         0 |      68.8 |     0.28 |
 
-### Pendulum — SAC
+## Tips
 
-| env      | algo   |   n_envs |     env FPS |   train FPS |   RSS MB |   peak MB |   ΔRSS MB | temp °C   |   wall s |
-|----------|--------|----------|-------------|-------------|----------|-----------|-----------|-----------|----------|
-| pendulum | SAC    |       16 |      77,789 |       2,356 |    240.7 |     240.7 |     182.5 | N/A       |     8.49 |
-| pendulum | SAC    |       32 |     224,830 |      14,910 |    250.4 |     250.4 |       9.7 | N/A       |     2.15 |
-| pendulum | SAC    |       64 |     473,468 |      28,951 |    252.2 |     252.2 |       1.8 | N/A       |     2.21 |
-| pendulum | SAC    |      128 |     947,372 |      55,500 |    254.2 |     254.2 |       1.9 | N/A       |     2.31 |
-| pendulum | SAC    |      256 |   1,906,301 |     112,907 |    256   |     256   |       1.8 | N/A       |     2.27 |
-| pendulum | SAC    |      512 |   3,815,842 |     218,949 |    256.3 |     256.3 |       0.3 | N/A       |     2.34 |
-| pendulum | SAC    |     1024 |   7,599,915 |     437,211 |    258.1 |     258.1 |       1.8 | N/A       |     2.29 |
-| pendulum | SAC    |     2048 |  15,122,280 |     838,733 |    260.3 |     260.3 |       2.2 | N/A       |     1.19 |
-| pendulum | SAC    |     4096 |  30,213,067 |   1,459,606 |    262.6 |     262.6 |       2.3 | N/A       |     0.69 |
-| pendulum | SAC    |     8192 |  60,141,434 |   2,428,536 |    262.8 |     262.8 |       0.2 | N/A       |     0.42 |
-| pendulum | SAC    |    16384 | 118,482,521 |   3,708,173 |    264   |     264   |       1.2 | N/A       |     0.27 |
-| pendulum | SAC    |    32768 | 215,605,780 |   4,952,519 |    264.2 |     264.2 |       0.1 | N/A       |     0.21 |
-| pendulum | SAC    |    65536 | 313,257,681 |   5,844,931 |    264.4 |     264.4 |       0.2 | N/A       |     0.18 |
+- **MLX graph memory** grows during the first compile; the RSS delta you see on small `n_envs` is usually one-time compilation cost.
+- **Thermal readings** require `smctemp` or a `sudoers` NOPASSWD rule for `/usr/bin/powermetrics` if you want the `powermetrics` fallback to work passwordlessly.
+- **Vectorization** is the main lever for throughput: `CartPoleMLX` and `PendulumMLX` are designed to step thousands of envs in a single MLX call.
 
 ## License
 

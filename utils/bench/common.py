@@ -57,18 +57,19 @@ def _peak_rss_mb() -> float:
     return usage / (1024 * 1024) if sys.platform == "darwin" else usage / 1024
 
 
-def _temperature_c() -> float | None:
+def _temperature_c() -> float | str | None:
     """Best-effort macOS temperature reading; returns None when unavailable.
 
-    No privileged operation is required. Different Macs expose temperature through
-    different utilities, so several commonly installed tools are tried.
+    Tries smctemp first for a Celsius value, then osx-cpu-temp, then
+    powermetrics' thermal pressure level (e.g. Nominal/Moderate) as a fallback.
     """
     commands = [
+        ["smctemp", "-c"],
         ["osx-cpu-temp"],
-        ["smctemp"],
-        ["powermetrics", "--samplers", "smc", "-n", "1", "-i", "100"],
+        ["sudo", "powermetrics", "--samplers", "thermal", "-n", "1", "-i", "100"],
     ]
     patterns = [
+        re.compile(r"(?m)^\s*(-?\d+(?:\.\d+)?)\s*$"),
         re.compile(r"(-?\d+(?:\.\d+)?)\s*°?C", re.I),
         re.compile(r"CPU\s+die\s+temperature:\s*(-?\d+(?:\.\d+)?)", re.I),
         re.compile(r"CPU\s+temperature:\s*(-?\d+(?:\.\d+)?)", re.I),
@@ -90,16 +91,21 @@ def _temperature_c() -> float | None:
             if match:
                 try:
                     value = float(match.group(1))
-                    if -20.0 < value < 130.0:
+                    if 0.0 < value < 130.0:
                         return value
                 except ValueError:
                     pass
+        pressure = re.search(r"Current pressure level:\s*(\S+)", output, re.I)
+        if pressure:
+            return pressure.group(1)
     return None
 
 
 def _fmt(value, digits: int = 1) -> str:
     if value is None:
         return "N/A"
+    if isinstance(value, str):
+        return value
     return f"{value:.{digits}f}"
 
 

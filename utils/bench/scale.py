@@ -160,7 +160,7 @@ def print_normal(rows: list[dict]) -> None:
     print("\nNORMAL / THROUGHPUT")
     print(tabulate(
         table,
-        headers=["env", "algo", "n_envs", "env FPS", "train FPS", "RSS MB", "peak MB", "ΔRSS MB", "temp °C", "wall s"],
+        headers=["env", "algo", "n_envs", "env FPS", "train FPS", "RSS MB", "peak MB", "ΔRSS MB", "thermal", "wall s"],
         tablefmt="github",
     ))
 
