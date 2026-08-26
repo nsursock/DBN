@@ -20,6 +20,7 @@ from cartpole import CartPoleMLX
 from pendulum import PendulumMLX
 from ppo import PPO
 from sac import SAC
+from td3 import TD3
 
 
 CRITERIA = {
@@ -69,6 +70,11 @@ def run(kind, n_envs, train_steps, seed, logdir):
         model = PPO("MlpPolicy", env, n_steps=512, batch_size=512, n_epochs=5, learning_rate=3e-4, gamma=0.99, ent_coef=0.0, verbose=1, seed=seed, tensorboard_log=logdir)
         algo = "PPO"
         env_name = "pendulum"
+    elif kind.startswith("pendulum_td3"):
+        env = PendulumMLX(n_envs=n_envs, seed=seed)
+        model = TD3("MlpPolicy", env, learning_rate=3e-4, buffer_size=200_000, learning_starts=2_000, batch_size=256, tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1, policy_delay=2, target_policy_noise=0.2, target_noise_clip=0.5, verbose=1, seed=seed, tensorboard_log=logdir)
+        algo = "TD3"
+        env_name = "pendulum"
     else:
         env = PendulumMLX(n_envs=n_envs, seed=seed)
         model = SAC("MlpPolicy", env, learning_rate=3e-4, buffer_size=200_000, learning_starts=2_000, batch_size=256, tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1, verbose=1, seed=seed, tensorboard_log=logdir)
@@ -86,13 +92,13 @@ def run(kind, n_envs, train_steps, seed, logdir):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("target", choices=["cartpole_ppo", "pendulum_ppo", "pendulum_sac", "all"])
+    parser.add_argument("target", choices=["cartpole_ppo", "pendulum_ppo", "pendulum_sac", "pendulum_td3", "all"])
     parser.add_argument("--n-envs", type=int, default=32)
     parser.add_argument("--timesteps", type=int, default=300_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--logdir", default="runs/mlx")
     args = parser.parse_args(argv)
-    targets = ["cartpole_ppo", "pendulum_ppo", "pendulum_sac"] if args.target == "all" else [args.target]
+    targets = ["cartpole_ppo", "pendulum_ppo", "pendulum_sac", "pendulum_td3"] if args.target == "all" else [args.target]
     results = [run(t, args.n_envs, args.timesteps, args.seed, args.logdir) for t in targets]
     return 0 if all(results) else 1
 

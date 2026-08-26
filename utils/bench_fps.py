@@ -6,10 +6,12 @@ Examples
 Normal throughput benchmark:
     python bench_fps.py normal --env cartpole --algo ppo --envs 1 4 16 64 256
     python bench_fps.py normal --env pendulum --algo sac --envs 1 4 16 64 256
+    python bench_fps.py normal --env pendulum --algo td3 --envs 1 4 16 64 256
 
 TTS benchmark:
     python bench_fps.py solve --target cartpole_ppo --envs 32 128 256
     python bench_fps.py solve --target pendulum_sac --envs 32 128 256
+    python bench_fps.py solve --target pendulum_td3 --envs 32 128 256
 
 The normal mode reports:
     env FPS, training FPS, RSS/peak RSS, and best-effort macOS temperature.
@@ -46,12 +48,14 @@ def _components():
         from .pendulum import PendulumMLX
         from .ppo import PPO
         from .sac import SAC
+        from .td3 import TD3
     except ImportError:
         from cartpole import CartPoleMLX
         from pendulum import PendulumMLX
         from ppo import PPO
         from sac import SAC
-    return CartPoleMLX, PendulumMLX, PPO, SAC
+        from td3 import TD3
+    return CartPoleMLX, PendulumMLX, PPO, SAC, TD3
 
 
 __test__ = False
@@ -65,6 +69,7 @@ TARGETS = {
     "cartpole_ppo": ("cartpole", "ppo"),
     "pendulum_ppo": ("pendulum", "ppo"),
     "pendulum_sac": ("pendulum", "sac"),
+    "pendulum_td3": ("pendulum", "td3"),
 }
 
 
@@ -141,7 +146,7 @@ def _fmt(value, digits: int = 1) -> str:
 
 
 def _make_env(env_name: str, n_envs: int, seed: int):
-    CartPoleMLX, PendulumMLX, _, _ = _components()
+    CartPoleMLX, PendulumMLX, *_ = _components()
     if env_name == "cartpole":
         return CartPoleMLX(n_envs=n_envs, seed=seed)
     if env_name == "pendulum":
@@ -150,7 +155,7 @@ def _make_env(env_name: str, n_envs: int, seed: int):
 
 
 def _make_model(env_name: str, algo: str, env, seed: int, logdir: str | None = None, verbose: int = 0):
-    _, _, PPO, SAC = _components()
+    _, _, PPO, SAC, TD3 = _components()
     kwargs = dict(seed=seed, verbose=verbose, tensorboard_log=logdir)
     if algo == "ppo":
         if env_name == "cartpole":
@@ -169,6 +174,20 @@ def _make_model(env_name: str, algo: str, env, seed: int, logdir: str | None = N
             gradient_steps=1,
         )
         return SAC("MlpPolicy", env, **kwargs)
+    if algo == "td3":
+        kwargs.update(
+            buffer_size=200_000,
+            learning_starts=2_000,
+            batch_size=256,
+            tau=0.005,
+            gamma=0.99,
+            train_freq=1,
+            gradient_steps=1,
+            policy_delay=2,
+            target_policy_noise=0.2,
+            target_noise_clip=0.5,
+        )
+        return TD3("MlpPolicy", env, **kwargs)
     raise ValueError(f"unknown algorithm: {algo}")
 
 
@@ -454,7 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     normal = sub.add_parser("normal", help="throughput / memory / temperature benchmark")
     normal.add_argument("--env", choices=["cartpole", "pendulum"], required=True)
-    normal.add_argument("--algo", choices=["ppo", "sac"], required=True)
+    normal.add_argument("--algo", choices=["ppo", "sac", "td3"], required=True)
     normal.add_argument("--envs", nargs="+", type=int, default=None,
                         help="explicit list of n_envs to test (overrides auto-doubling)")
     normal.add_argument("--start-envs", type=int, default=16,
