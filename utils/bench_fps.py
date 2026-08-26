@@ -37,6 +37,12 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+
 try:
     from tabulate import tabulate
 except ImportError as exc:  # pragma: no cover
