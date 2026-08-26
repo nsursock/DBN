@@ -259,6 +259,9 @@ def run_normal(args) -> list[dict]:
     n_envs = args.start_envs if auto else None
     env_iter = iter(args.envs) if not auto else None
     plateau_frac = args.plateau_pct / 100.0
+    best_fps = 0.0
+    failures = 0
+    patience = 1
     while True:
         if auto:
             if n_envs > args.max_envs:
@@ -283,7 +286,7 @@ def run_normal(args) -> list[dict]:
             target_steps = args.train_steps
         elif args.algo == "ppo":
             n_steps = getattr(model, "n_steps", 256)
-            target_steps = max(50_000, min(1_000_000, n_envs * n_steps * 20))
+            target_steps = max(100_000, min(1_000_000, n_envs * n_steps * 50))
         else:
             target_steps = max(20_000, min(1_000_000, n_envs * 1000))
         start = time.perf_counter()
@@ -311,7 +314,12 @@ def run_normal(args) -> list[dict]:
             }
         )
         if auto:
-            if len(rows) >= 2 and train_fps < rows[-2]["train_fps"] * (1.0 + plateau_frac):
+            if train_fps > best_fps * (1.0 + plateau_frac):
+                best_fps = float(train_fps)
+                failures = 0
+            else:
+                failures += 1
+            if failures > patience:
                 break
             n_envs *= 2
     return rows
@@ -449,8 +457,8 @@ def build_parser() -> argparse.ArgumentParser:
     normal.add_argument("--algo", choices=["ppo", "sac"], required=True)
     normal.add_argument("--envs", nargs="+", type=int, default=None,
                         help="explicit list of n_envs to test (overrides auto-doubling)")
-    normal.add_argument("--start-envs", type=int, default=8,
-                        help="first n_envs when auto-doubling (default: 8)")
+    normal.add_argument("--start-envs", type=int, default=16,
+                        help="first n_envs when auto-doubling (default: 16)")
     normal.add_argument("--max-envs", type=int, default=100_000,
                         help="maximum n_envs when auto-doubling (default: 100000)")
     normal.add_argument("--plateau-pct", type=float, default=5.0,

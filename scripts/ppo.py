@@ -216,13 +216,19 @@ class PPO(MLXAgent):
 
     def _compile_gae(self):
         def gae_fn(rew_b, done_b, val_b, last_value, T):
-            advantages = mx.zeros_like(rew_b)
+            advantages = []
             gae = mx.zeros((self.n_envs,), dtype=mx.float32)
             for t in range(T - 1, -1, -1):
                 next_value = last_value if t == T - 1 else val_b[t + 1]
                 nonterminal = 1.0 - done_b[t]
-                gae = rew_b[t] + self.gamma * next_value * nonterminal - val_b[t] + self.gamma * self.gae_lambda * nonterminal * gae
-                advantages[t] = gae
+                gae = (
+                    rew_b[t]
+                    + self.gamma * next_value * nonterminal
+                    - val_b[t]
+                    + self.gamma * self.gae_lambda * nonterminal * gae
+                )
+                advantages.append(gae)
+            advantages = mx.stack(advantages[::-1], axis=0)
             returns = advantages + val_b
             return advantages, returns
 
@@ -332,6 +338,7 @@ class PPO(MLXAgent):
             flat_adv = advantages.reshape(-1)
             flat_ret = returns.reshape(-1)
             flat_val = val_b.reshape(-1)
+            mx.eval(flat_obs, flat_act, flat_logp, flat_adv, flat_ret, flat_val)
 
             n = T * self.n_envs
             target_batches = 32
@@ -343,14 +350,13 @@ class PPO(MLXAgent):
                 for b in range(n_batches):
                     s = b * mb
                     e = min(s + mb, n)
-                    idx = mx.arange(s, e).astype(mx.int32)
                     result = self._step_impl(
-                        mx.take(flat_obs, idx, axis=0),
-                        mx.take(flat_act, idx, axis=0),
-                        mx.take(flat_logp, idx, axis=0),
-                        mx.take(flat_adv, idx, axis=0),
-                        mx.take(flat_ret, idx, axis=0),
-                        mx.take(flat_val, idx, axis=0),
+                        flat_obs[s:e],
+                        flat_act[s:e],
+                        flat_logp[s:e],
+                        flat_adv[s:e],
+                        flat_ret[s:e],
+                        flat_val[s:e],
                     )
                     pg = pg + result[1]
                     vl = vl + result[2]
