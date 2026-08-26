@@ -11,7 +11,7 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-from mlx.utils import tree_map
+from mlx.utils import tree_flatten, tree_map
 from tqdm import tqdm
 
 try:
@@ -172,7 +172,9 @@ class PPO(MLXAgent):
                 value_loss = 0.5 * mx.mean(mx.square(values - returns))
             ent_loss = -mx.mean(entropy)
             total_loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * ent_loss
-            return total_loss, policy_loss, value_loss, ent_loss
+            approx_kl = 0.5 * mx.mean(mx.square(old_logp - logp))
+            clip_fraction = mx.mean((mx.abs(ratio - 1.0) > self.clip_range).astype(mx.float32))
+            return total_loss, policy_loss, value_loss, ent_loss, approx_kl, clip_fraction
 
         loss_and_grad = nn.value_and_grad(self.policy_net, loss_fn)
         state = [self.policy_net.state, self.optimizer.state]
@@ -186,11 +188,8 @@ class PPO(MLXAgent):
         self._step_impl = mx.compile(step, inputs=state, outputs=state)
 
     def _clip_grads(self, grads):
-        leaves = []
-        tree_map(lambda x: leaves.append(x) or x, grads)
-        sq = mx.array(0.0)
-        for g in leaves:
-            sq = sq + mx.sum(mx.square(g))
+        leaves = [v for _, v in tree_flatten(grads)]
+        sq = sum(mx.sum(mx.square(g)) for g in leaves)
         norm = mx.sqrt(sq + 1e-8)
         scale = mx.minimum(mx.array(1.0), mx.array(self.max_grad_norm) / norm)
         return tree_map(lambda g: g * scale, grads)
@@ -345,7 +344,7 @@ class PPO(MLXAgent):
             n_batches = max(1, min(target_batches, n // self.batch_size))
             mb = (n + n_batches - 1) // n_batches
             total_updates = n_batches * self.n_epochs
-            pg, vl, ent = 0.0, 0.0, 0.0
+            pg, vl, ent, akl, cf = 0.0, 0.0, 0.0, 0.0, 0.0
             for _ in range(self.n_epochs):
                 for b in range(n_batches):
                     s = b * mb
@@ -361,15 +360,17 @@ class PPO(MLXAgent):
                     pg = pg + result[1]
                     vl = vl + result[2]
                     ent = ent - result[3]
-            mx.eval(self.policy_net.state, self.optimizer.state, pg, vl, ent)
+                    akl = akl + result[4]
+                    cf = cf + result[5]
+            mx.eval(self.policy_net.state, self.optimizer.state, pg, vl, ent, akl, cf)
             if not mx.all(mx.isfinite(mx.stack([pg, vl, ent]))).item():
                 raise RuntimeError(f"non-finite losses: pg={pg} vl={vl} ent={ent}")
             train = {
                 "policy_gradient_loss": float(pg.item()) / total_updates,
                 "value_loss": float(vl.item()) / total_updates,
                 "entropy_loss": float(ent.item()) / total_updates,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "approx_kl": float(akl.item()) / total_updates,
+                "clip_fraction": float(cf.item()) / total_updates,
                 "clip_range": self.clip_range,
                 "n_updates": total_updates,
             }

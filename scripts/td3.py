@@ -78,6 +78,7 @@ class ReplayBuffer:
         self.dones[idx] = mx.array(dones, dtype=mx.float32).reshape(-1)
         self.pos = (self.pos + n) % self.size
         self.full = self.full or (self.pos == 0)
+        mx.eval(self.obs, self.actions, self.rewards, self.next_obs, self.dones)
 
     @property
     def length(self) -> int:
@@ -270,12 +271,11 @@ class TD3(MLXAgent):
             self.q2.state,
             self.q1_target.state,
             self.q2_target.state,
-            self.actor_opt.state,
             self.q1_opt.state,
             self.q2_opt.state,
         ]
 
-        def step(obs, actions, rewards, next_obs, dones, update_actor):
+        def step(obs, actions, rewards, next_obs, dones):
             next_action = self._target_action(next_obs)
             target_q1 = self.q1_target(next_obs, next_action)
             target_q2 = self.q2_target(next_obs, next_action)
@@ -286,12 +286,7 @@ class TD3(MLXAgent):
             self.q2_opt.update(self.q2, q2_grads)
 
             actor_value, actor_grads = actor_vg(self.actor, obs)
-            actor_loss_value = mx.where(update_actor, actor_value, mx.array(0.0, dtype=mx.float32))
-            masked_actor_grads = tree_map(
-                lambda g: mx.where(update_actor, g, mx.zeros_like(g)), actor_grads
-            )
-            self.actor_opt.update(self.actor, masked_actor_grads)
-            return loss1, loss2, actor_loss_value
+            return loss1, loss2, actor_value, actor_grads
 
         self._update_step = mx.compile(step, inputs=state, outputs=state)
 
@@ -365,19 +360,20 @@ class TD3(MLXAgent):
                 for _ in range(max(1, self.gradient_steps)):
                     batch = self.replay.sample(self.batch_size)
                     self.gradient_step += 1
-                    update_actor = mx.array(
-                        1.0 if (self.gradient_step % self.policy_delay == 0) else 0.0,
-                        dtype=mx.float32,
-                    )
-                    q1_loss, q2_loss, actor_loss = self._update_step(*batch, update_actor)
-                    mx.eval(
-                        self.actor.parameters(), self.q1.parameters(), self.q2.parameters(),
-                        self.actor_opt.state, self.q1_opt.state, self.q2_opt.state,
-                    )
-                    if update_actor.item():
+                    q1_loss, q2_loss, actor_loss, actor_grads = self._update_step(*batch)
+                    update_actor = self.gradient_step % self.policy_delay == 0
+                    _polyak(self.q1_target, self.q1, self.tau)
+                    _polyak(self.q2_target, self.q2, self.tau)
+                    if update_actor:
+                        self.actor_opt.update(self.actor, actor_grads)
                         _polyak(self.actor_target, self.actor, self.tau)
-                        _polyak(self.q1_target, self.q1, self.tau)
-                        _polyak(self.q2_target, self.q2, self.tau)
+                    mx.eval(
+                        self.actor.parameters(), self.actor_opt.state,
+                        self.q1.parameters(), self.q2.parameters(),
+                        self.q1_opt.state, self.q2_opt.state,
+                        self.actor_target.parameters(),
+                        self.q1_target.parameters(), self.q2_target.parameters(),
+                    )
                     if not (_finite(q1_loss) and _finite(q2_loss) and _finite(actor_loss)):
                         raise FloatingPointError("TD3 produced a non-finite loss")
 

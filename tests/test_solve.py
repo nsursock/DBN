@@ -11,10 +11,36 @@ from __future__ import annotations
 __test__ = False  # Explicitly exclude this long-running harness from pytest collection.
 
 import argparse
+import math
 import statistics
 import sys
 
 import mlx.core as mx
+
+
+class OrnsteinUhlenbeckActionNoise:
+    def __init__(self, mean: float, sigma: float, n_envs: int = 1, action_dim: int = 1, theta: float = 0.15, dt: float = 1.0):
+        self.mean = float(mean)
+        self.sigma = float(sigma)
+        self.theta = float(theta)
+        self.dt = float(dt)
+        self.n_envs = int(n_envs)
+        self.action_dim = int(action_dim)
+        self.x = mx.zeros((self.n_envs, self.action_dim), dtype=mx.float32)
+
+    def __call__(self, n: int | None = None):
+        if n is not None and n != self.n_envs:
+            self.n_envs = int(n)
+            self.x = mx.zeros((self.n_envs, self.action_dim), dtype=mx.float32)
+        noise = self.x
+        self.x = (
+            self.x
+            + self.theta * (self.mean - self.x) * self.dt
+            + self.sigma * math.sqrt(self.dt) * mx.random.normal(shape=self.x.shape)
+        )
+        mx.eval(self.x)
+        return noise
+
 
 from cartpole import CartPoleMLX
 from pendulum import PendulumMLX
@@ -31,28 +57,27 @@ CRITERIA = {
 
 def evaluate(model, env, episodes=100):
     obs = env.reset()
-    running = mx.zeros((env.n_envs,), dtype=mx.float32)
-    runnings = []
-    dones = []
-    max_steps = max(1, (episodes + env.n_envs - 1) // env.n_envs) * env.max_episode_steps
-    for _ in range(max_steps):
+    n_envs = env.n_envs
+    current = mx.zeros((n_envs,), dtype=mx.float32)
+    returns = []
+
+    while len(returns) < episodes:
         action = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, _ = env.step(action)
-        running = running + reward
+        current = current + reward
         done = terminated | truncated
-        running = mx.where(done, 0.0, running)
-        runnings.append(running)
-        dones.append(done)
-        mx.eval(obs, running, done)
-    runnings_b = mx.stack(runnings)
-    dones_b = mx.stack(dones)
-    done_mask = dones_b.reshape(-1).astype(mx.bool_)
-    returns_all = (runnings_b * dones_b.astype(mx.float32)).reshape(-1)
-    returns_flat = mx.where(done_mask, returns_all, mx.zeros_like(returns_all))
-    returns = [r for r, d in zip(returns_flat.tolist(), done_mask.tolist()) if d]
-    if len(returns) < episodes:
-        tail = running.tolist()
-        returns.extend(tail[: episodes - len(returns)])
+        mx.eval(current, done)
+
+        if mx.any(done).item():
+            for i, finished in enumerate(done.tolist()):
+                if finished:
+                    returns.append(current.tolist()[i])
+                    if len(returns) >= episodes:
+                        break
+            current = mx.where(done, 0.0, current)
+
+        mx.eval(obs, current, done)
+
     clip = returns[:episodes]
     return statistics.mean(clip), statistics.pstdev(clip) if len(clip) > 1 else 0.0
 
@@ -72,7 +97,7 @@ def run(kind, n_envs, train_steps, seed, logdir):
         env_name = "pendulum"
     elif kind.startswith("pendulum_td3"):
         env = PendulumMLX(n_envs=n_envs, seed=seed)
-        model = TD3("MlpPolicy", env, learning_rate=3e-4, buffer_size=200_000, learning_starts=2_000, batch_size=256, tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1, policy_delay=2, target_policy_noise=0.2, target_noise_clip=0.5, verbose=1, seed=seed, tensorboard_log=logdir)
+        model = TD3("MlpPolicy", env, learning_rate=3e-4, buffer_size=200_000, learning_starts=2_000, batch_size=256, tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1, policy_delay=2, target_policy_noise=0.2, target_noise_clip=0.5, action_noise=OrnsteinUhlenbeckActionNoise(0.0, 0.8, n_envs, env.action_dim, theta=0.1), verbose=1, seed=seed, tensorboard_log=logdir)
         algo = "TD3"
         env_name = "pendulum"
     else:

@@ -79,6 +79,7 @@ class ReplayBuffer:
         self.pos = (self.pos + n) % self.size
         if self.pos == 0:
             self.full = True
+        mx.eval(self.obs, self.actions, self.rewards, self.next_obs, self.dones)
 
     @property
     def length(self):
