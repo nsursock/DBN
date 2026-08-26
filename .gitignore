@@ -1,0 +1,12 @@
+.aider*
+
+.venv/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+outputs/
+.DS_Store
+
+logs/
+outputs/

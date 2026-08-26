@@ -1,0 +1,25 @@
+num_candles: 100
+
+symbols:
+  - BTC
+  - ETH
+  - SOL
+  - XRP
+  - ADA
+
+channels:
+  - open
+  - high
+  - low
+  - close
+  - volume
+  - returns
+  - volatility
+  - funding
+  - alpha
+
+initial_price: 100.0
+gbm_drift: 0.05
+gbm_vol: 0.20
+ar_phi: 0.70
+seed: 42
