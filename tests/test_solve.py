@@ -30,23 +30,30 @@ CRITERIA = {
 
 def evaluate(model, env, episodes=100):
     obs = env.reset()
-    completed = 0
-    returns = []
     running = mx.zeros((env.n_envs,), dtype=mx.float32)
-    while completed < episodes:
+    runnings = []
+    dones = []
+    max_steps = max(1, (episodes + env.n_envs - 1) // env.n_envs) * env.max_episode_steps
+    for _ in range(max_steps):
         action = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, _ = env.step(action)
         running = running + reward
         done = terminated | truncated
-        done_np = done.tolist()
-        vals = running.tolist()
-        for i, d in enumerate(done_np):
-            if d and completed < episodes:
-                returns.append(float(vals[i]))
-                completed += 1
         running = mx.where(done, 0.0, running)
-        mx.eval(obs, running)
-    return statistics.mean(returns), statistics.pstdev(returns) if len(returns) > 1 else 0.0
+        runnings.append(running)
+        dones.append(done)
+        mx.eval(obs, running, done)
+    runnings_b = mx.stack(runnings)
+    dones_b = mx.stack(dones)
+    done_mask = dones_b.reshape(-1).astype(mx.bool_)
+    returns_all = (runnings_b * dones_b.astype(mx.float32)).reshape(-1)
+    returns_flat = mx.where(done_mask, returns_all, mx.zeros_like(returns_all))
+    returns = [r for r, d in zip(returns_flat.tolist(), done_mask.tolist()) if d]
+    if len(returns) < episodes:
+        tail = running.tolist()
+        returns.extend(tail[: episodes - len(returns)])
+    clip = returns[:episodes]
+    return statistics.mean(clip), statistics.pstdev(clip) if len(clip) > 1 else 0.0
 
 
 def run(kind, n_envs, train_steps, seed, logdir):

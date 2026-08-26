@@ -279,11 +279,18 @@ def run_normal(args) -> list[dict]:
         env_fps = benchmark_env_fps(args.env, n_envs, args.seed, args.env_steps, args.warmup)
 
         model = _make_model(args.env, algo, env, args.seed, logdir=logdir, verbose=0)
+        if args.train_steps is not None:
+            target_steps = args.train_steps
+        elif args.algo == "ppo":
+            n_steps = getattr(model, "n_steps", 256)
+            target_steps = max(50_000, min(1_000_000, n_envs * n_steps * 20))
+        else:
+            target_steps = max(20_000, min(1_000_000, n_envs * 1000))
         start = time.perf_counter()
-        model.learn(args.train_steps)
+        model.learn(target_steps)
         elapsed = max(time.perf_counter() - start, 1e-9)
         progress = _recent_progress(model)
-        train_fps = progress.get("time/fps", (args.train_steps / elapsed))
+        train_fps = progress.get("time/fps", (target_steps / elapsed))
         rss_after = _rss_mb()
         peak_rss = _peak_rss_mb()
         temp_after = _temperature_c()
@@ -450,7 +457,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="stop auto-doubling when train FPS gain falls below this %% (default: 5.0)")
     normal.add_argument("--env-steps", type=int, default=2_000, help="raw env steps used for environment FPS")
     normal.add_argument("--warmup", type=int, default=200)
-    normal.add_argument("--train-steps", type=int, default=50_000)
+    normal.add_argument("--train-steps", type=int, default=None,
+                        help="training steps; if omitted, PPO uses min(1M, n_envs * n_steps * 4) to amortize compile")
     normal.add_argument("--seed", type=int, default=0)
     normal.add_argument("--logdir", default="runs/bench")
     normal.set_defaults(func=run_normal, printer=print_normal)

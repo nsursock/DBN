@@ -120,6 +120,8 @@ class PPO(MLXAgent):
         self.optimizer = optim.Adam(learning_rate=learning_rate)
         mx.eval(self.policy_net.parameters())
         self._compile_update()
+        self._compile_step_and_act()
+        self._compile_gae()
         self.csv_path = csv_log_path or self._csv_path_from_tensorboard(tensorboard_log)
         self._csv_file = None
         self._csv_writer = None
@@ -193,12 +195,47 @@ class PPO(MLXAgent):
         scale = mx.minimum(mx.array(1.0), mx.array(self.max_grad_norm) / norm)
         return tree_map(lambda g: g * scale, grads)
 
-    def _act(self, obs, deterministic=False):
+    def _compile_step_and_act(self):
+        state = [self.policy_net.state]
+
+        def step_and_act(obs, episode_length, policy_key, reset_key):
+            pkey, skey = mx.random.split(policy_key)
+            if self.is_discrete:
+                u = mx.random.uniform(shape=(obs.shape[0], 1), key=skey)
+                action, logp, value = self._act(obs, u=u)
+            else:
+                noise = mx.random.normal(shape=(obs.shape[0], self.action_dim), key=skey)
+                action, logp, value = self._act(obs, noise=noise)
+            rkey, rk = mx.random.split(reset_key)
+            reset_state = self.env._reset_state(key=rk)
+            next_obs, reward, terminated, truncated, next_ep_len = self.env._dynamics(obs, episode_length, action, reset_state)
+            done = terminated | truncated
+            return next_obs, next_ep_len, action, logp, value, reward, done, pkey, rkey
+
+        self._step_fn = mx.compile(step_and_act, inputs=state, outputs=state)
+
+    def _compile_gae(self):
+        def gae_fn(rew_b, done_b, val_b, last_value, T):
+            advantages = mx.zeros_like(rew_b)
+            gae = mx.zeros((self.n_envs,), dtype=mx.float32)
+            for t in range(T - 1, -1, -1):
+                next_value = last_value if t == T - 1 else val_b[t + 1]
+                nonterminal = 1.0 - done_b[t]
+                gae = rew_b[t] + self.gamma * next_value * nonterminal - val_b[t] + self.gamma * self.gae_lambda * nonterminal * gae
+                advantages[t] = gae
+            returns = advantages + val_b
+            return advantages, returns
+
+        self._gae_fn = mx.compile(gae_fn)
+
+    def _act(self, obs, deterministic=False, u=None, noise=None):
         logits, value = self.policy_net(obs)
         if self.is_discrete:
             log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             probs = mx.exp(log_probs)
-            if deterministic:
+            if u is not None:
+                action = mx.sum(u > mx.cumsum(probs, axis=1), axis=1).astype(mx.int32)
+            elif deterministic:
                 action = mx.argmax(logits, axis=1)
             else:
                 u = mx.random.uniform(shape=(obs.shape[0], 1))
@@ -207,7 +244,12 @@ class PPO(MLXAgent):
             lp = mx.take_along_axis(log_probs, action[:, None], axis=1).squeeze(1)
         else:
             std = mx.exp(self.policy_net.log_std)
-            raw = logits if deterministic else logits + std * mx.random.normal(shape=logits.shape)
+            if noise is not None:
+                raw = logits + std * noise
+            elif deterministic:
+                raw = logits
+            else:
+                raw = logits + std * mx.random.normal(shape=logits.shape)
             action = mx.clip(raw, self.action_low, self.action_high)
             lp = (-0.5 * (((action - logits) / (std + 1e-8)) ** 2 + 2 * mx.log(std + 1e-8) + math.log(2 * math.pi))).sum(axis=1)
         return action, lp, value
@@ -254,15 +296,17 @@ class PPO(MLXAgent):
     def learn(self, total_timesteps: int, callback=None, log_interval: int = 1, tb_log_name="PPO", reset_num_timesteps=True, progress_bar=False):
         del callback, tb_log_name, reset_num_timesteps, progress_bar
         obs = self.env.reset()
+        episode_length = self.env._episode_length
+        seed = self.seed if self.seed is not None else 0
+        policy_key = mx.random.key(seed)
+        reset_key = mx.random.key(seed + 1)
         start_time = time.perf_counter()
         pbar = tqdm(total=total_timesteps, unit="step", disable=(self.verbose == 0), dynamic_ncols=True, desc="MLX PPO")
         while self.total_timesteps < total_timesteps:
             T = min(self.n_steps, max(1, (total_timesteps - self.total_timesteps + self.n_envs - 1) // self.n_envs))
             obs_buf, act_buf, rew_buf, done_buf, logp_buf, val_buf = [], [], [], [], [], []
             for _ in range(T):
-                action, logp, value = self._act(obs, deterministic=False)
-                next_obs, reward, terminated, truncated, _ = self.env.step(action)
-                done = terminated | truncated
+                next_obs, next_ep_len, action, logp, value, reward, done, policy_key, reset_key = self._step_fn(obs, episode_length, policy_key, reset_key)
                 obs_buf.append(obs)
                 act_buf.append(action)
                 rew_buf.append(reward)
@@ -270,6 +314,7 @@ class PPO(MLXAgent):
                 logp_buf.append(logp)
                 val_buf.append(value)
                 obs = next_obs
+                episode_length = next_ep_len
             _, _, last_value = self._act(obs, deterministic=True)
             obs_b = mx.stack(obs_buf)
             act_b = mx.stack(act_buf)
@@ -277,15 +322,10 @@ class PPO(MLXAgent):
             done_b = mx.stack(done_buf).astype(mx.float32)
             logp_b = mx.stack(logp_buf)
             val_b = mx.stack(val_buf)
+            mx.eval(obs_b, act_b, rew_b, done_b, logp_b, val_b, last_value)
 
-            advantages = mx.zeros_like(rew_b)
-            gae = mx.zeros((self.n_envs,), dtype=mx.float32)
-            for t in range(T - 1, -1, -1):
-                next_value = last_value if t == T - 1 else val_b[t + 1]
-                nonterminal = 1.0 - done_b[t]
-                gae = rew_b[t] + self.gamma * next_value * nonterminal - val_b[t] + self.gamma * self.gae_lambda * nonterminal * gae
-                advantages[t] = gae
-            returns = advantages + val_b
+            advantages, returns = self._gae_fn(rew_b, done_b, val_b, last_value, T)
+            mx.eval(advantages, returns)
             flat_obs = obs_b.reshape((-1, self.obs_dim))
             flat_act = act_b.reshape((-1,) if self.is_discrete else (-1, self.action_dim))
             flat_logp = logp_b.reshape(-1)
@@ -294,13 +334,16 @@ class PPO(MLXAgent):
             flat_val = val_b.reshape(-1)
 
             n = T * self.n_envs
-            mb = min(self.batch_size, n)
-            train = {"policy_gradient_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "approx_kl": 0.0, "n_updates": 0}
-            for _epoch in range(self.n_epochs):
-                indices = mx.arange(n)
-                for start in range(0, n, mb):
-                    idx = indices[start:start + mb]
-                    idx = idx.astype(mx.int32)
+            target_batches = 32
+            n_batches = max(1, min(target_batches, n // self.batch_size))
+            mb = (n + n_batches - 1) // n_batches
+            total_updates = n_batches * self.n_epochs
+            pg, vl, ent = 0.0, 0.0, 0.0
+            for _ in range(self.n_epochs):
+                for b in range(n_batches):
+                    s = b * mb
+                    e = min(s + mb, n)
+                    idx = mx.arange(s, e).astype(mx.int32)
                     result = self._step_impl(
                         mx.take(flat_obs, idx, axis=0),
                         mx.take(flat_act, idx, axis=0),
@@ -309,26 +352,30 @@ class PPO(MLXAgent):
                         mx.take(flat_ret, idx, axis=0),
                         mx.take(flat_val, idx, axis=0),
                     )
-                    for name, v in zip(["total_loss", "policy_gradient_loss", "value_loss", "entropy_loss"], result):
-                        if not mx.isfinite(v).item():
-                            raise RuntimeError(f"non-finite {name}: {v}")
-                    vals = [float(x.item()) for x in result]
-                    train["policy_gradient_loss"] += vals[1]
-                    train["value_loss"] += vals[2]
-                    train["entropy_loss"] += -vals[3]
-                    train["n_updates"] += 1
-                if self.target_kl is not None:
-                    pass
-            mx.eval(self.policy_net.state, self.optimizer.state)
+                    pg = pg + result[1]
+                    vl = vl + result[2]
+                    ent = ent - result[3]
+            mx.eval(self.policy_net.state, self.optimizer.state, pg, vl, ent)
+            if not mx.all(mx.isfinite(mx.stack([pg, vl, ent]))).item():
+                raise RuntimeError(f"non-finite losses: pg={pg} vl={vl} ent={ent}")
+            train = {
+                "policy_gradient_loss": float(pg.item()) / total_updates,
+                "value_loss": float(vl.item()) / total_updates,
+                "entropy_loss": float(ent.item()) / total_updates,
+                "approx_kl": 0.0,
+                "clip_fraction": 0.0,
+                "clip_range": self.clip_range,
+                "n_updates": total_updates,
+            }
             self.total_timesteps += T * self.n_envs
             pbar.update(T * self.n_envs)
-            train = {k: (v / max(1, train["n_updates"])) for k, v in train.items() if k != "n_updates"}
-            train.update({"approx_kl": 0.0, "clip_fraction": 0.0, "clip_range": self.clip_range, "n_updates": int(sum(1 for _ in range(self.n_epochs) for _ in range((n + mb - 1) // mb)))})
             row = self._log(self.total_timesteps, time.perf_counter() - start_time, rew_b[-1], mx.ones((self.n_envs,)) * T, train)
             pbar.set_postfix(fps=row["time/fps"], reward=f"{row['rollout/ep_rew_mean']:.1f}", slope=f"{row['rollout/reward_slope']:.3f}", noise=f"{row['rollout/reward_noise']:.2f}")
         pbar.close()
         if self._csv_file:
             self._csv_file.close()
+        self.env.state = obs
+        self.env._episode_length = episode_length
         return self
 
     def save(self, path):

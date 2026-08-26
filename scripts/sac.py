@@ -70,6 +70,7 @@ class ReplayBuffer:
     def add(self, obs, action, reward, next_obs, done):
         n = obs.shape[0]
         idx = (mx.arange(n) + self.pos) % self.size
+        mx.eval(obs, action, reward, next_obs, done)
         self.obs[idx] = obs
         self.actions[idx] = action
         self.rewards[idx] = reward
@@ -147,6 +148,7 @@ class SAC(MLXAgent):
         self.gradient_steps = int(gradient_steps)
         self.target_update_interval = int(target_update_interval)
         self.verbose = verbose
+        self.seed = seed
         self.stats_window_size = stats_window_size
         self.total_timesteps = 0
         self.policy_kwargs = policy_kwargs or {}
@@ -168,6 +170,7 @@ class SAC(MLXAgent):
         self.replay = ReplayBuffer(self.buffer_size, self.obs_dim, self.action_dim)
         mx.eval(self.actor.parameters(), self.q1.parameters(), self.q2.parameters(), self.tq1.parameters(), self.tq2.parameters())
         self._compile_update()
+        self._compile_step_and_act()
         self.csv_path = csv_log_path or (os.path.join(tensorboard_log, "progress.csv") if tensorboard_log else None)
         self._csv_file = None
         self._csv_writer = None
@@ -177,10 +180,12 @@ class SAC(MLXAgent):
         self.reward_history = deque(maxlen=stats_window_size)
         self._recent_rewards = []
 
-    def _sample_action(self, obs, deterministic=False):
+    def _sample_action(self, obs, deterministic=False, noise=None):
         mean, log_std = self.actor(obs)
         std = mx.exp(log_std)
-        if deterministic:
+        if noise is not None:
+            raw = mean + std * noise
+        elif deterministic:
             raw = mean
         else:
             raw = mean + std * mx.random.normal(shape=mean.shape)
@@ -229,6 +234,21 @@ class SAC(MLXAgent):
 
         self._update_step = mx.compile(step, inputs=state, outputs=state)
 
+    def _compile_step_and_act(self):
+        state = [self.actor.state]
+
+        def step_and_act(obs, episode_length, policy_key, reset_key):
+            pkey, skey = mx.random.split(policy_key)
+            noise = mx.random.normal(shape=(obs.shape[0], self.action_dim), key=skey)
+            action, _ = self._sample_action(obs, noise=noise)
+            rkey, rk = mx.random.split(reset_key)
+            reset_state = self.env._reset_state(key=rk)
+            next_obs, reward, terminated, truncated, next_ep_len = self.env._dynamics(obs, episode_length, action, reset_state)
+            done = terminated | truncated
+            return next_obs, next_ep_len, action, reward, done, pkey, rkey
+
+        self._step_fn = mx.compile(step_and_act, inputs=state, outputs=state)
+
     def _sample_action_with_actor(self, actor, obs, deterministic=False):
         mean, log_std = actor(obs)
         std = mx.exp(log_std)
@@ -274,15 +294,19 @@ class SAC(MLXAgent):
     def learn(self, total_timesteps: int, callback=None, log_interval: int = 1, tb_log_name="SAC", reset_num_timesteps=True, progress_bar=False):
         del callback, log_interval, tb_log_name, reset_num_timesteps, progress_bar
         obs = self.env.reset()
+        episode_length = self.env._episode_length
+        seed = self.seed if self.seed is not None else 0
+        policy_key = mx.random.key(seed)
+        reset_key = mx.random.key(seed + 1)
         start = time.perf_counter()
         pbar = tqdm(total=total_timesteps, unit="step", disable=(self.verbose == 0), dynamic_ncols=True, desc="MLX SAC")
         latest_reward = mx.zeros((self.n_envs,), dtype=mx.float32)
         while self.total_timesteps < total_timesteps:
-            action, _ = self._sample_action(obs, deterministic=False)
-            next_obs, reward, terminated, truncated, _ = self.env.step(action)
-            done = terminated | truncated
+            next_obs, next_ep_len, action, reward, done, policy_key, reset_key = self._step_fn(obs, episode_length, policy_key, reset_key)
+            mx.eval(next_obs, next_ep_len, action, reward, done)
             self.replay.add(obs, action, reward, next_obs, done)
             obs = next_obs
+            episode_length = next_ep_len
             self.total_timesteps += self.n_envs
             latest_reward = reward
             if self.replay.length >= max(self.learning_starts, self.batch_size):
@@ -297,11 +321,12 @@ class SAC(MLXAgent):
                 if self.total_timesteps // self.n_envs % self.target_update_interval == 0:
                     self.tq1.update(tree_map(lambda a, b: self.tau * a + (1.0 - self.tau) * b, self.q1.parameters(), self.tq1.parameters()))
                     self.tq2.update(tree_map(lambda a, b: self.tau * a + (1.0 - self.tau) * b, self.q2.parameters(), self.tq2.parameters()))
+                train_vals = mx.stack([q1l, q2l, al, alph_grad]).tolist()
                 train = {
-                    "actor_loss": float(al.item()),
-                    "critic_loss": float((q1l.item() + q2l.item()) * 0.5),
+                    "actor_loss": float(train_vals[2]),
+                    "critic_loss": float((train_vals[0] + train_vals[1]) * 0.5),
                     "ent_coef": float(mx.exp(self.log_alpha).item()),
-                    "entropy_loss": float(alph_grad.item()),
+                    "entropy_loss": float(train_vals[3]),
                 }
                 row = self._log(self.total_timesteps, start, latest_reward, train)
                 pbar.set_postfix(fps=row["time/fps"], reward=f"{row['rollout/ep_rew_mean']:.1f}", slope=f"{row['rollout/reward_slope']:.3f}", noise=f"{row['rollout/reward_noise']:.2f}")
@@ -309,6 +334,8 @@ class SAC(MLXAgent):
         pbar.close()
         if self._csv_file:
             self._csv_file.close()
+        self.env.state = obs
+        self.env._episode_length = episode_length
         return self
 
     def save(self, path):

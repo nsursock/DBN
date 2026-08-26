@@ -35,15 +35,11 @@ class CartPoleMLX:
         self._episode_length = mx.zeros((self.n_envs,), dtype=mx.int32)
         self._reset_all()
 
-    def _noise(self, shape, scale):
-        return mx.random.uniform(shape=shape, low=-scale, high=scale)
+    def _noise(self, shape, scale, key=None):
+        return mx.random.uniform(shape=shape, low=-scale, high=scale, key=key)
 
-    def _initial_state(self, mask=None, state=None):
-        x = self._noise((self.n_envs,), 0.05)
-        x_dot = self._noise((self.n_envs,), 0.05)
-        theta = self._noise((self.n_envs,), 0.05)
-        theta_dot = self._noise((self.n_envs,), 0.05)
-        fresh = mx.stack([x, x_dot, theta, theta_dot], axis=1)
+    def _initial_state(self, mask=None, state=None, key=None):
+        fresh = self._reset_state(key=key)
         if state is None or mask is None:
             return fresh
         return mx.where(mask[:, None], fresh, state)
@@ -62,9 +58,11 @@ class CartPoleMLX:
         mx.eval(self.state)
         return self.state
 
-    def step(self, actions):
-        actions = mx.array(actions, dtype=mx.int32).reshape((self.n_envs,))
-        x, x_dot, theta, theta_dot = [self.state[:, i] for i in range(4)]
+    def _reset_state(self, key=None):
+        return mx.random.uniform(shape=(self.n_envs, 4), low=-0.05, high=0.05, key=key)
+
+    def _dynamics(self, state, episode_length, actions, reset_state):
+        x, x_dot, theta, theta_dot = [state[:, i] for i in range(4)]
         force = mx.where(actions == 1, 10.0, -10.0)
         gravity = 9.8
         masscart = 1.0
@@ -85,16 +83,25 @@ class CartPoleMLX:
         theta = theta + tau * theta_dot
         theta_dot = theta_dot + tau * theta_acc
 
-        self._episode_length = self._episode_length + 1
+        episode_length = episode_length + 1
         terminated = (x < -2.4) | (x > 2.4) | (theta < -12.0 * math.pi / 180.0) | (theta > 12.0 * math.pi / 180.0)
-        truncated = self._episode_length >= self.max_episode_steps
+        truncated = episode_length >= self.max_episode_steps
         done = terminated | truncated
         reward = mx.where(terminated, 0.0, 1.0).astype(mx.float32)
-        self._episode_reward = self._episode_reward + reward
 
         next_state = mx.stack([x, x_dot, theta, theta_dot], axis=1)
-        next_state = self._initial_state(done, next_state)
-        self._episode_reward = mx.where(done, 0.0, self._episode_reward)
-        self._episode_length = mx.where(done, 0, self._episode_length)
+        next_state = mx.where(done[:, None], reset_state, next_state)
+        episode_length = mx.where(done, 0, episode_length)
+        return next_state, reward, terminated, truncated, episode_length
+
+    def step(self, actions):
+        actions = mx.array(actions, dtype=mx.int32).reshape((self.n_envs,))
+        reset_state = self._reset_state()
+        next_state, reward, terminated, truncated, episode_length = self._dynamics(
+            self.state, self._episode_length, actions, reset_state
+        )
+        self._episode_reward = self._episode_reward + reward
+        self._episode_reward = mx.where(terminated | truncated, 0.0, self._episode_reward)
+        self._episode_length = episode_length
         self.state = next_state
         return next_state, reward, terminated, truncated, {}
