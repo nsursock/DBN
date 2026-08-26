@@ -8,25 +8,26 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+sys.path.insert(
+    0,
+    os.path.dirname(
+        os.path.dirname(
+            os.path.dirname(
+                os.path.abspath(__file__),
+            ),
+        ),
+    ),
+)
 
 __test__ = False
 
 
 def _components():
-    try:
-        from .cartpole import CartPoleMLX
-        from .pendulum import PendulumMLX
-        from .ppo import PPO
-        from .sac import SAC
-        from .td3 import TD3
-    except ImportError:
-        from cartpole import CartPoleMLX
-        from pendulum import PendulumMLX
-        from ppo import PPO
-        from sac import SAC
-        from td3 import TD3
+    from scripts.ppo import PPO
+    from scripts.sac import SAC
+    from scripts.td3 import TD3
+    from tests.cartpole import CartPoleMLX
+    from tests.pendulum import PendulumMLX
     return CartPoleMLX, PendulumMLX, PPO, SAC, TD3
 
 

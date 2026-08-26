@@ -12,19 +12,17 @@ __test__ = False  # Explicitly exclude this long-running harness from pytest col
 
 import argparse
 import math
+import os
 import statistics
 import sys
 
 import mlx.core as mx
-import os
-import sys
 
 sys.path.insert(
     0,
     os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "..",
-        "scripts",
     ),
 )
 
@@ -53,11 +51,11 @@ class OrnsteinUhlenbeckActionNoise:
         return noise
 
 
-from cartpole import CartPoleMLX
-from pendulum import PendulumMLX
-from ppo import PPO
-from sac import SAC
-from td3 import TD3
+from scripts.ppo import PPO
+from scripts.sac import SAC
+from scripts.td3 import TD3
+from tests.cartpole import CartPoleMLX
+from tests.pendulum import PendulumMLX
 
 
 CRITERIA = {

@@ -14,16 +14,15 @@ sys.path.insert(
     os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "..",
-        "scripts",
     ),
 )
 
 import mlx.core as mx
 
-from cartpole import CartPoleMLX
-from pendulum import PendulumMLX
-from ppo import PPO
-from sac import SAC
+from scripts.ppo import PPO
+from scripts.sac import SAC
+from tests.cartpole import CartPoleMLX
+from tests.pendulum import PendulumMLX
 
 
 def test_cartpole_vector_step_fast():

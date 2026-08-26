@@ -3,10 +3,10 @@
 
 Examples
 --------
-    PYTHONPATH=scripts:tests:utils .venv/bin/python utils/bench/solve.py \
+    .venv/bin/python utils/bench/solve.py \
         --target cartpole_ppo --envs 32 128 256
 
-    PYTHONPATH=scripts:tests:utils .venv/bin/python utils/bench/solve.py \
+    .venv/bin/python utils/bench/solve.py \
         --target pendulum_sac --envs 32 128 256 --max-timesteps 1_000_000
 
 The solve mode reports:
@@ -22,7 +22,10 @@ import statistics
 import time
 from typing import Iterable
 
-from common import _fmt, _make_env, _make_model, _mlx, _recent_progress
+try:
+    from .common import _fmt, _make_env, _make_model, _mlx, _recent_progress
+except ImportError:
+    from common import _fmt, _make_env, _make_model, _mlx, _recent_progress
 
 try:
     from tabulate import tabulate

@@ -3,9 +3,9 @@
 
 Examples
 --------
-    PYTHONPATH=scripts:tests:utils .venv/bin/python utils/bench/scale.py normal --env cartpole --algo ppo --envs 1 4 16 64 256
-    PYTHONPATH=scripts:tests:utils .venv/bin/python utils/bench/scale.py normal --env pendulum --algo sac --envs 1 4 16 64 256
-    PYTHONPATH=scripts:tests:utils .venv/bin/python utils/bench/scale.py normal --env pendulum --algo td3 --envs 1 4 16 64 256
+    .venv/bin/python utils/bench/scale.py normal --env cartpole --algo ppo --envs 1 4 16 64 256
+    .venv/bin/python utils/bench/scale.py normal --env pendulum --algo sac --envs 1 4 16 64 256
+    .venv/bin/python utils/bench/scale.py normal --env pendulum --algo td3 --envs 1 4 16 64 256
 
 The normal mode reports:
     env FPS, training FPS, RSS/peak RSS, and best-effort macOS temperature.
@@ -18,16 +18,28 @@ import argparse
 import os
 import time
 
-from common import (
-    _fmt,
-    _make_env,
-    _make_model,
-    _mlx,
-    _recent_progress,
-    _rss_mb,
-    _peak_rss_mb,
-    _temperature_c,
-)
+try:
+    from .common import (
+        _fmt,
+        _make_env,
+        _make_model,
+        _mlx,
+        _recent_progress,
+        _rss_mb,
+        _peak_rss_mb,
+        _temperature_c,
+    )
+except ImportError:
+    from common import (
+        _fmt,
+        _make_env,
+        _make_model,
+        _mlx,
+        _recent_progress,
+        _rss_mb,
+        _peak_rss_mb,
+        _temperature_c,
+    )
 
 try:
     from tabulate import tabulate

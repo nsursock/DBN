@@ -23,14 +23,14 @@ pip install -r requirements.txt
 Run a throughput benchmark for a given environment and algorithm:
 
 ```bash
-PYTHONPATH=scripts:tests:utils .venv/bin/python utils/bench/scale.py normal \
+.venv/bin/python utils/bench/scale.py normal \
   --env cartpole --algo ppo --max-envs 16384
 ```
 
 Or with SAC on a continuous control task:
 
 ```bash
-PYTHONPATH=scripts:tests:utils .venv/bin/python utils/bench/scale.py normal \
+.venv/bin/python utils/bench/scale.py normal \
   --env pendulum --algo sac --max-envs 100000
 ```
 
