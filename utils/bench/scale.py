@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from datetime import datetime
 
 try:
     from .common import (
@@ -91,9 +92,7 @@ def run_normal(args) -> list[dict]:
         _mlx()
         env = _make_env(args.env, n_envs, args.seed)
         algo = args.algo
-        logdir = os.path.join(args.logdir, "normal", f"{args.env}_{algo}_{n_envs}")
-        os.makedirs(logdir, exist_ok=True)
-
+        logdir = args.logdir
         rss_before = _rss_mb()
         temp_before = _temperature_c()
         env_fps = benchmark_env_fps(args.env, n_envs, args.seed, args.env_steps, args.warmup)
@@ -189,7 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     normal.add_argument("--smoke", action="store_true",
                         help="quick smoke test with --envs 16 32 64 and 100k train steps")
     normal.add_argument("--seed", type=int, default=0)
-    normal.add_argument("--logdir", default="runs/bench")
+    normal.add_argument("--logdir", default=None)
     normal.set_defaults(func=run_normal, printer=print_normal)
     return parser
 
@@ -197,6 +196,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.logdir is None:
+        args.logdir = os.path.join("logs", datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+    os.makedirs(args.logdir, exist_ok=True)
     if args.smoke:
         combos = [("cartpole", "ppo"), ("pendulum", "sac"), ("pendulum", "td3")]
         rows = []

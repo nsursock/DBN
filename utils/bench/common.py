@@ -120,7 +120,10 @@ def _make_env(env_name: str, n_envs: int, seed: int):
 
 def _make_model(env_name: str, algo: str, env, seed: int, logdir: str | None = None, verbose: int = 0):
     _, _, PPO, SAC, TD3 = _components()
-    kwargs = dict(seed=seed, verbose=verbose, tensorboard_log=logdir)
+    kwargs = dict(seed=seed, verbose=verbose)
+    if logdir:
+        csv = os.path.join(logdir, f"progress_{env_name}_{algo}_{env.n_envs}envs.csv")
+        kwargs["csv_log_path"] = csv
     if algo == "ppo":
         max_steps = 500 if env_name == "cartpole" else 512
         n_steps = min(max_steps, max(64, 65_536 // env.n_envs))

@@ -4,6 +4,8 @@ The trading bot can depend on this interface without depending on PPO/SAC detail
 """
 from __future__ import annotations
 
+import csv
+import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
@@ -33,6 +35,27 @@ class MLXAgent(Agent):
 
     def __init__(self, model: Any = None):
         self.model = model
+
+    def _resample_csv(self, n: int = 100):
+        path = getattr(self, "csv_path", None)
+        if not path or not os.path.exists(path):
+            return
+        if getattr(self, "_csv_file", None):
+            self._csv_file.flush()
+        with open(path, newline="") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            fieldnames = reader.fieldnames
+        if len(rows) <= n:
+            return
+        step = (len(rows) - 1) / (n - 1)
+        sampled = [rows[int(i * step)] for i in range(n)]
+        base, ext = os.path.splitext(path)
+        out = f"{base}_resampled_{n}{ext}"
+        with open(out, "w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(sampled)
 
     def predict(self, observation: Any, deterministic: bool = True):
         if self.model is None:

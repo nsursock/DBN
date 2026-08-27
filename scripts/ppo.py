@@ -5,6 +5,7 @@ import csv
 import math
 import os
 import time
+from datetime import datetime
 from collections import deque
 from typing import Any
 
@@ -122,7 +123,16 @@ class PPO(MLXAgent):
         self._compile_update()
         self._compile_step_and_act()
         self._compile_gae()
-        self.csv_path = csv_log_path or self._csv_path_from_tensorboard(tensorboard_log)
+        if csv_log_path:
+            self.csv_path = csv_log_path
+            self._logdir = os.path.dirname(csv_log_path)
+        else:
+            env_name = self.env.__class__.__name__.replace("MLX", "").lower()
+            algo_name = self.__class__.__name__.lower()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self._logdir = os.path.join("logs", ts)
+            os.makedirs(self._logdir, exist_ok=True)
+            self.csv_path = os.path.join(self._logdir, f"progress_{env_name}_{algo_name}_{self.n_envs}envs.csv")
         self._csv_file = None
         self._csv_writer = None
         if self.csv_path:
@@ -130,13 +140,7 @@ class PPO(MLXAgent):
         self.reward_history = deque(maxlen=stats_window_size)
         self.ep_len_history = deque(maxlen=stats_window_size)
         self._recent_rewards = []
-
-    @staticmethod
-    def _csv_path_from_tensorboard(path):
-        if not path:
-            return None
-        os.makedirs(path, exist_ok=True)
-        return os.path.join(path, "progress.csv")
+        self._iterations = 0
 
     def _open_csv(self, path):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -273,6 +277,7 @@ class PPO(MLXAgent):
         self._csv_file.flush()
 
     def _log(self, timestep, elapsed, rewards, episode_lengths, train):
+        self._iterations += 1
         ep_reward = float(mx.mean(rewards).item())
         ep_len = float(mx.mean(episode_lengths).item())
         self.reward_history.extend([ep_reward])
@@ -286,6 +291,7 @@ class PPO(MLXAgent):
         self._recent_rewards.append(mean_reward)
         fps = int(timestep / max(elapsed, 1e-9))
         row = {
+            "time/iterations": self._iterations,
             "time/fps": fps,
             "time/time_elapsed": elapsed,
             "time/total_timesteps": timestep,
@@ -331,6 +337,9 @@ class PPO(MLXAgent):
 
             advantages, returns = self._gae_fn(rew_b, done_b, val_b, last_value, T)
             mx.eval(advantages, returns)
+            diff = returns - val_b
+            explained_var = float((1.0 - mx.var(diff) / (mx.var(returns) + 1e-8)).item())
+            policy_std = float(mx.mean(mx.exp(self.policy_net.log_std)).item())
             flat_obs = obs_b.reshape((-1, self.obs_dim))
             flat_act = act_b.reshape((-1,) if self.is_discrete else (-1, self.action_dim))
             flat_logp = logp_b.reshape(-1)
@@ -373,14 +382,18 @@ class PPO(MLXAgent):
                 "clip_fraction": float(cf.item()) / total_updates,
                 "clip_range": self.clip_range,
                 "n_updates": total_updates,
+                "learning_rate": self.learning_rate,
+                "explained_variance": explained_var,
+                "std": policy_std,
             }
             self.total_timesteps += T * self.n_envs
             pbar.update(T * self.n_envs)
-            row = self._log(self.total_timesteps, time.perf_counter() - start_time, rew_b[-1], mx.ones((self.n_envs,)) * T, train)
+            row = self._log(self.total_timesteps, time.perf_counter() - start_time, rew_b[-1], episode_length, train)
             pbar.set_postfix(fps=row["time/fps"], reward=f"{row['rollout/ep_rew_mean']:.1f}", slope=f"{row['rollout/reward_slope']:.3f}", noise=f"{row['rollout/reward_noise']:.2f}")
         pbar.close()
         self.env.state = obs
         self.env._episode_length = episode_length
+        self._resample_csv(100)
         return self
 
     def save(self, path):

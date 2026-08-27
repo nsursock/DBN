@@ -10,6 +10,7 @@ import csv
 import math
 import os
 import time
+from datetime import datetime
 from collections import deque
 
 import mlx.core as mx
@@ -206,9 +207,16 @@ class TD3(MLXAgent):
         )
         self._compile_update()
 
-        self.csv_path = csv_log_path or (
-            os.path.join(tensorboard_log, "progress.csv") if tensorboard_log else None
-        )
+        if csv_log_path:
+            self.csv_path = csv_log_path
+            self._logdir = os.path.dirname(csv_log_path)
+        else:
+            env_name = self.env.__class__.__name__.replace("MLX", "").lower()
+            algo_name = self.__class__.__name__.lower()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self._logdir = os.path.join("logs", ts)
+            os.makedirs(self._logdir, exist_ok=True)
+            self.csv_path = os.path.join(self._logdir, f"progress_{env_name}_{algo_name}_{self.n_envs}envs.csv")
         self._csv_file = None
         self._csv_writer = None
         if self.csv_path:
@@ -217,6 +225,7 @@ class TD3(MLXAgent):
 
         self.reward_history = deque(maxlen=self.stats_window_size)
         self._recent_rewards = deque(maxlen=32)
+        self._iterations = 0
 
     def _clip_action(self, action):
         return mx.clip(action, self.action_low, self.action_high)
@@ -290,8 +299,10 @@ class TD3(MLXAgent):
 
         self._update_step = mx.compile(step, inputs=state, outputs=state)
 
-    def _log(self, timestep, start, rewards, train):
+    def _log(self, timestep, start, rewards, episode_length, train):
+        self._iterations += 1
         mean_reward = float(mx.mean(rewards).item())
+        ep_len = float(mx.mean(episode_length).item())
         self.reward_history.append(mean_reward)
         smoothed = sum(self.reward_history) / max(1, len(self.reward_history))
         self._recent_rewards.append(smoothed)
@@ -301,10 +312,12 @@ class TD3(MLXAgent):
         elapsed = max(time.perf_counter() - start, 1e-9)
         fps = int(timestep / elapsed)
         row = {
+            "time/iterations": self._iterations,
             "time/fps": fps,
             "time/time_elapsed": elapsed,
             "time/total_timesteps": timestep,
             "rollout/ep_rew_mean": smoothed,
+            "rollout/ep_len_mean": ep_len,
             "rollout/reward_slope": slope,
             "rollout/reward_noise": noise,
             **{f"train/{k}": v for k, v in train.items()},
@@ -350,6 +363,7 @@ class TD3(MLXAgent):
         while self.total_timesteps < total_timesteps:
             action = self._exploration_action(obs, deterministic=False)
             next_obs, reward, terminated, truncated, _ = self.env.step(action)
+            episode_length = self.env._episode_length
             done = terminated | truncated
             self.replay.add(obs, action, reward, next_obs, done)
             obs = next_obs
@@ -377,14 +391,34 @@ class TD3(MLXAgent):
                     if not (_finite(q1_loss) and _finite(q2_loss) and _finite(actor_loss)):
                         raise FloatingPointError("TD3 produced a non-finite loss")
 
+                s_obs, s_actions, s_rewards, s_next_obs, s_dones = batch
+                q1m = self.q1(s_obs, s_actions)
+                q2m = self.q2(s_obs, s_actions)
+                q1_mean = float(mx.mean(q1m).item())
+                q2_mean = float(mx.mean(q2m).item())
+                q_mean = (q1_mean + q2_mean) * 0.5
+                next_action = self._target_action(s_next_obs)
+                target = s_rewards + self.gamma * (1.0 - s_dones) * mx.minimum(self.q1_target(s_next_obs, next_action), self.q2_target(s_next_obs, next_action))
+                q = mx.minimum(q1m, q2m)
+                explained_var = float((1.0 - mx.var(q - target) / (mx.var(target) + 1e-8)).item())
+                actor_loss_val = float(actor_loss.item())
+                critic_loss_val = float(((q1_loss + q2_loss) * 0.5).item())
                 train = {
-                    "policy_gradient_loss": float(actor_loss.item()),
-                    "critic_loss": float(((q1_loss + q2_loss) * 0.5).item()),
-                    "q1_loss": float(q1_loss.item()),
-                    "q2_loss": float(q2_loss.item()),
-                    "policy_delay": float(self.policy_delay),
+                    "loss/actor": actor_loss_val,
+                    "loss/critic": critic_loss_val,
+                    "loss/q1": float(q1_loss.item()),
+                    "loss/q2": float(q2_loss.item()),
+                    "value/q1_mean": q1_mean,
+                    "value/q2_mean": q2_mean,
+                    "value/q_mean": q_mean,
+                    "learning_rate": self.learning_rate,
+                    "n_updates": self.gradient_step,
+                    "explained_variance": explained_var,
+                    "std": 0.0,
+                    "policy": actor_loss_val,
+                    "value": critic_loss_val,
                 }
-                row = self._log(self.total_timesteps, start, latest_reward, train)
+                row = self._log(self.total_timesteps, start, latest_reward, episode_length, train)
                 if self.verbose:
                     pbar.set_postfix(
                         fps=row["time/fps"],
@@ -395,6 +429,7 @@ class TD3(MLXAgent):
             pbar.update(self.n_envs)
 
         pbar.close()
+        self._resample_csv(100)
         return self
 
     def save(self, path: str):

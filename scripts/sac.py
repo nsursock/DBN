@@ -5,6 +5,7 @@ import csv
 import math
 import os
 import time
+from datetime import datetime
 from collections import deque
 
 import mlx.core as mx
@@ -172,7 +173,16 @@ class SAC(MLXAgent):
         mx.eval(self.actor.parameters(), self.q1.parameters(), self.q2.parameters(), self.tq1.parameters(), self.tq2.parameters())
         self._compile_update()
         self._compile_step_and_act()
-        self.csv_path = csv_log_path or (os.path.join(tensorboard_log, "progress.csv") if tensorboard_log else None)
+        if csv_log_path:
+            self.csv_path = csv_log_path
+            self._logdir = os.path.dirname(csv_log_path)
+        else:
+            env_name = self.env.__class__.__name__.replace("MLX", "").lower()
+            algo_name = self.__class__.__name__.lower()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self._logdir = os.path.join("logs", ts)
+            os.makedirs(self._logdir, exist_ok=True)
+            self.csv_path = os.path.join(self._logdir, f"progress_{env_name}_{algo_name}_{self.n_envs}envs.csv")
         self._csv_file = None
         self._csv_writer = None
         if self.csv_path:
@@ -180,6 +190,8 @@ class SAC(MLXAgent):
             self._csv_file = open(self.csv_path, "w", newline="")
         self.reward_history = deque(maxlen=stats_window_size)
         self._recent_rewards = []
+        self._iterations = 0
+        self.n_updates = 0
 
     def _sample_action(self, obs, deterministic=False, noise=None):
         mean, log_std = self.actor(obs)
@@ -266,8 +278,10 @@ class SAC(MLXAgent):
         mx.eval(action)
         return action
 
-    def _log(self, timestep, start, rewards, train):
+    def _log(self, timestep, start, rewards, episode_length, train):
+        self._iterations += 1
         mean_reward = float(mx.mean(rewards).item())
+        ep_len = float(mx.mean(episode_length).item())
         self.reward_history.append(mean_reward)
         smoothed = sum(self.reward_history) / len(self.reward_history)
         self._recent_rewards.append(smoothed)
@@ -276,10 +290,12 @@ class SAC(MLXAgent):
         noise = math.sqrt(sum((y - smoothed) ** 2 for y in ys) / len(ys)) if ys else 0.0
         fps = int(timestep / max(time.perf_counter() - start, 1e-9))
         row = {
+            "time/iterations": self._iterations,
             "time/fps": fps,
             "time/time_elapsed": time.perf_counter() - start,
             "time/total_timesteps": timestep,
             "rollout/ep_rew_mean": smoothed,
+            "rollout/ep_len_mean": ep_len,
             "rollout/reward_slope": slope,
             "rollout/reward_noise": noise,
             **{f"train/{k}": v for k, v in train.items()},
@@ -316,25 +332,52 @@ class SAC(MLXAgent):
                     q1l, q2l, al, alph_grad = self._update_step(
                         self.log_alpha, *batch
                     )
+                    self.n_updates += 1
                     if self.auto_entropy:
                         self.log_alpha = self.log_alpha - self.learning_rate * alph_grad
                     mx.eval(self.actor.parameters(), self.q1.parameters(), self.q2.parameters(), self.actor_opt.state, self.q1_opt.state, self.q2_opt.state, self.log_alpha)
                 if self.total_timesteps // self.n_envs % self.target_update_interval == 0:
                     self.tq1.update(tree_map(lambda a, b: self.tau * a + (1.0 - self.tau) * b, self.q1.parameters(), self.tq1.parameters()))
                     self.tq2.update(tree_map(lambda a, b: self.tau * a + (1.0 - self.tau) * b, self.q2.parameters(), self.tq2.parameters()))
-                train_vals = mx.stack([q1l, q2l, al, alph_grad]).tolist()
+                s_obs, s_actions, s_rewards, s_next_obs, s_dones = batch
+                q1m = self.q1(s_obs, s_actions)
+                q2m = self.q2(s_obs, s_actions)
+                q1_mean = float(mx.mean(q1m).item())
+                q2_mean = float(mx.mean(q2m).item())
+                q_mean = (q1_mean + q2_mean) * 0.5
+                _, logp = self._sample_action_with_actor(self.actor, s_obs, deterministic=False)
+                log_pi_mean = float(mx.mean(logp).item())
+                alpha = float(mx.exp(self.log_alpha).item())
+                alpha_loss = float((-self.log_alpha * (mx.mean(logp) + self.target_entropy)).item())
+                _, log_std = self.actor(s_obs)
+                std = float(mx.mean(mx.exp(log_std)).item())
+                next_a, next_logp = self._sample_action(s_next_obs, deterministic=False)
+                target = s_rewards + self.gamma * (1.0 - s_dones) * (mx.minimum(self.tq1(s_next_obs, next_a), self.tq2(s_next_obs, next_a)) - alpha * next_logp)
+                q = mx.minimum(q1m, q2m)
+                explained_var = float((1.0 - mx.var(q - target) / (mx.var(target) + 1e-8)).item())
                 train = {
-                    "actor_loss": float(train_vals[2]),
-                    "critic_loss": float((train_vals[0] + train_vals[1]) * 0.5),
-                    "ent_coef": float(mx.exp(self.log_alpha).item()),
-                    "entropy_loss": float(train_vals[3]),
+                    "loss/policy": float(al.item()),
+                    "loss/critic": (float(q1l.item()) + float(q2l.item())) * 0.5,
+                    "loss/q1": float(q1l.item()),
+                    "loss/q2": float(q2l.item()),
+                    "loss/alpha": alpha_loss,
+                    "policy/alpha": alpha,
+                    "policy/log_pi_mean": log_pi_mean,
+                    "value/q_mean": q_mean,
+                    "value/q1_mean": q1_mean,
+                    "value/q2_mean": q2_mean,
+                    "learning_rate": self.learning_rate,
+                    "n_updates": self.n_updates,
+                    "explained_variance": explained_var,
+                    "std": std,
                 }
-                row = self._log(self.total_timesteps, start, latest_reward, train)
+                row = self._log(self.total_timesteps, start, latest_reward, episode_length, train)
                 pbar.set_postfix(fps=row["time/fps"], reward=f"{row['rollout/ep_rew_mean']:.1f}", slope=f"{row['rollout/reward_slope']:.3f}", noise=f"{row['rollout/reward_noise']:.2f}")
             pbar.update(self.n_envs)
         pbar.close()
         self.env.state = obs
         self.env._episode_length = episode_length
+        self._resample_csv(100)
         return self
 
     def save(self, path):

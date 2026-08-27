@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+from datetime import datetime
 import statistics
 import time
 from typing import Iterable
@@ -85,8 +86,7 @@ def _slope_noise(values: Iterable[float], window: int = 32) -> tuple[float, floa
 
 def run_solve_one(args, target: str, n_envs: int) -> dict:
     env_name, algo = TARGETS[target]
-    logdir = os.path.join(args.logdir, "solve", f"{target}_{n_envs}")
-    os.makedirs(logdir, exist_ok=True)
+    logdir = args.logdir
     _mlx()
     env = _make_env(env_name, n_envs, args.seed)
     model = _make_model(env_name, algo, env, args.seed, logdir=logdir, verbose=0)
@@ -96,6 +96,7 @@ def run_solve_one(args, target: str, n_envs: int) -> dict:
     eval_count = 0
     reward_history: list[float] = []
     best_reward = -math.inf
+    no_improve = 0
     solved = False
     solve_elapsed = None
     solve_timesteps = None
@@ -115,13 +116,19 @@ def run_solve_one(args, target: str, n_envs: int) -> dict:
         eval_count += 1
         mean_reward, std_reward = _evaluate(model, env_name, n_envs, args.seed, args.eval_episodes)
         reward_history.append(mean_reward)
-        best_reward = max(best_reward, mean_reward)
+        if mean_reward > best_reward:
+            best_reward = mean_reward
+            no_improve = 0
+        else:
+            no_improve += 1
         if mean_reward >= threshold:
             solved = True
             solve_elapsed = time.perf_counter() - wall_start
             solve_timesteps = model.total_timesteps
             solve_reward = mean_reward
             solve_std = std_reward
+            break
+        if args.early_stop_patience and no_improve >= args.early_stop_patience:
             break
 
     elapsed = time.perf_counter() - wall_start
@@ -227,10 +234,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-interval", type=int, default=10_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--max-timesteps", type=int, default=500_000)
+    parser.add_argument("--early-stop-patience", type=int, default=0,
+                        help="stop after N evals without a new best reward (0 disables, default: 0)")
     parser.add_argument("--smoke", action="store_true",
                         help="quick smoke test with --envs 16 32 64 and 200k max timesteps")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--logdir", default="runs/bench")
+    parser.add_argument("--logdir", default=None)
     parser.set_defaults(func=run_solve, printer=print_solve)
     return parser
 
@@ -238,6 +247,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.logdir is None:
+        args.logdir = os.path.join("logs", datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+    os.makedirs(args.logdir, exist_ok=True)
     if args.smoke:
         targets = ["cartpole_ppo", "pendulum_sac", "pendulum_td3"]
         args.envs = [16, 32, 64]
