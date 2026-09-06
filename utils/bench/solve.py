@@ -43,7 +43,6 @@ SOLVE_CRITERIA = {
 
 TARGETS = {
     "cartpole_ppo": ("cartpole", "ppo"),
-    "pendulum_ppo": ("pendulum", "ppo"),
     "pendulum_sac": ("pendulum", "sac"),
     "pendulum_td3": ("pendulum", "td3"),
 }
@@ -137,21 +136,31 @@ def run_solve_one(args, target: str, n_envs: int) -> dict:
     train_fps = progress.get("time/fps", 0.0)
     solved_s = solve_elapsed if solved else None
     solved_steps = solve_timesteps if solved else None
+    # True env-frame count: agent steps * parallel envs.
+    solved_env_steps = (solve_timesteps * n_envs) if solved else None
+    eval_reward = solve_reward if solved else (reward_history[-1] if reward_history else None)
+    best = best_reward if reward_history else None
+    reward_gap = (best - eval_reward) if (best is not None and eval_reward is not None) else None
+    slope_to_noise = (slope / noise) if noise else None
     return {
         "target": target,
         "n_envs": n_envs,
         "solved": "PASS" if solved else "FAIL",
+        "solved_bool": 1 if solved else 0,
         "tts_s": solved_s,
         "tts_timesteps": solved_steps,
-        "tts_env_steps": (solved_steps if solved else None),
+        "tts_env_steps": solved_env_steps,
         "train_fps": train_fps,
-        "eval_reward": solve_reward if solved else (reward_history[-1] if reward_history else None),
+        "sample_efficiency": (solve_timesteps / n_envs) if solved else None,
+        "eval_reward": eval_reward,
         "eval_std": solve_std if solved else None,
-        "best_reward": best_reward if reward_history else None,
+        "best_reward": best,
+        "reward_gap": reward_gap,
         "reward_slope": slope,
         "reward_noise": noise,
+        "slope_to_noise": slope_to_noise,
         "evals": eval_count,
-        "max_time_s": elapsed,
+        "wall_clock_s": elapsed,
     }
 
 
@@ -201,19 +210,24 @@ def print_solve(rows: list[dict]) -> None:
             f"{int(r['tts_timesteps']):,}" if r["tts_timesteps"] is not None else "-",
             f"{int(r['tts_env_steps']):,}" if r["tts_env_steps"] is not None else "-",
             f"{r['train_fps']:,.0f}",
+            f"{int(r['sample_efficiency']):,}" if r["sample_efficiency"] is not None else "-",
             _fmt(r["eval_reward"], 2),
             _fmt(r["eval_std"], 2),
             _fmt(r["best_reward"], 2),
+            _fmt(r["reward_gap"], 2),
             _fmt(r["reward_slope"], 3),
             _fmt(r["reward_noise"], 2),
+            _fmt(r["slope_to_noise"], 2),
             r["evals"],
+            f"{r['wall_clock_s']:.2f}",
         ])
     print("\nSOLVE / TIME-TO-SOLVE (TTS)")
     print(tabulate(
         table,
         headers=[
-            "target", "n_envs", "solve", "TTS s", "TTS timesteps", "TTS env steps",
-            "train FPS", "eval reward", "eval std", "best reward", "slope", "noise", "evals",
+            "Target", "Envs", "Status", "TTS (s)", "TTS (agent steps)", "Env Steps",
+            "Train FPS", "Steps/Env", "Eval Reward", "Eval Std", "Best Reward",
+            "Reward Gap", "Reward Slope", "Reward Noise", "S/N", "Evals", "Wall (s)",
         ],
         tablefmt="github",
     ))

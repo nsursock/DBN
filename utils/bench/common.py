@@ -177,6 +177,7 @@ def _recent_progress(model) -> dict[str, float]:
         result = {}
         for key, value in row.items():
             if key:
+                key = key.lower()
                 try:
                     result[key] = float(value)
                 except (TypeError, ValueError):

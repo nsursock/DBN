@@ -115,6 +115,9 @@ def run_normal(args) -> list[dict]:
         temp_after = _temperature_c()
         temp = temp_after if temp_after is not None else temp_before
 
+        rss_delta = rss_after - rss_before
+        # Flag rows whose RSS grew by more than 10% across the run — a leak signal.
+        leak = "*" if rss_before > 0 and rss_delta > 0.10 * rss_before else ""
         rows.append(
             {
                 "env": args.env,
@@ -122,11 +125,14 @@ def run_normal(args) -> list[dict]:
                 "n_envs": n_envs,
                 "env_fps": env_fps,
                 "train_fps": train_fps,
+                "fps_ratio": (train_fps / env_fps) if env_fps else None,
                 "rss_mb": rss_after,
                 "peak_rss_mb": peak_rss,
-                "rss_delta_mb": rss_after - rss_before,
+                "rss_delta_mb": rss_delta,
+                "leak": leak,
                 "temp_c": temp,
-                "wall_s": elapsed,
+                "wall_clock_s": elapsed,
+                "fps_per_env": (env_fps / n_envs) if n_envs else None,
             }
         )
         if auto:
@@ -150,16 +156,20 @@ def print_normal(rows: list[dict]) -> None:
             r["n_envs"],
             f"{r['env_fps']:,.0f}",
             f"{r['train_fps']:,.0f}",
-            f"{r['rss_mb']:.1f}",
-            f"{r['peak_rss_mb']:.1f}",
-            f"{r['rss_delta_mb']:+.1f}",
+            _fmt(r["fps_ratio"], 2),
+            f"{r['rss_mb']:.1f}/{r['peak_rss_mb']:.1f}",
+            f"{r['rss_delta_mb']:+.1f}{r['leak']}",
             _fmt(r["temp_c"], 1),
-            f"{r['wall_s']:.2f}",
+            f"{r['wall_clock_s']:.2f}",
+            _fmt(r["fps_per_env"], 1),
         ])
     print("\nNORMAL / THROUGHPUT")
     print(tabulate(
         table,
-        headers=["env", "algo", "n_envs", "env FPS", "train FPS", "RSS MB", "peak MB", "ΔRSS MB", "thermal", "wall s"],
+        headers=[
+            "Env", "Algo", "Envs", "Env FPS", "Train FPS", "FPS Ratio",
+            "RSS (cur/peak MB)", "ΔRSS (MB)", "Temp (°C)", "Wall (s)", "FPS/Env",
+        ],
         tablefmt="github",
     ))
 
